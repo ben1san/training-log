@@ -1,0 +1,24 @@
+:root {
+  --bg: #101214;
+  --panel: #181b1f;
+  --panel2: #21262c;
+  --line: #2a2f35;
+  --fg: #e8eaed;
+  --dim: #9aa3ad;
+  --accent: #4da3ff;
+  --warn: #ffb44d;
+  --danger: #ff6b6b;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body { margin: 0; height: 100%; }
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font: 16px/1.45 -apple-system, BlinkMacSystemFont, 'Hiragino Kaku Gothic ProN', sans-serif;
+  overscroll-behavior-y: contain;
+}
+#app { min-height: 100%; }
+button, input { font: inherit; color: inherit; }
+button { border: 0; background: none; cursor: pointer; }
+input { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; width: 100%; }
