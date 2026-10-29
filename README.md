@@ -163,12 +163,27 @@ npm run build && npm run preview   # 実機確認（--host でLANに出る）
 node scripts/gen-icons.mjs # アイコン再生成（依存なし）
 ```
 
-**iPhoneではホーム画面に追加して使う。**Safariはスクリプト書き込みストレージを
-7日間の未使用で破棄し、インストール済みPWAだけが対象外（この前提は未検証）。
-インストールされていない状態では画面上部に警告が出る。
+## 配信
 
-Service Worker は secure context が要るので、実機インストールには HTTPS か
-`localhost` が必要。LAN の生HTTPではインストールできない。
+**https://ben1san.github.io/training-log/**
+
+`master` への push で GitHub Actions が `npm ci → check → build` して Pages へ出す
+（`.github/workflows/pages.yml`）。
+
+配信先を固定しているのは **IndexedDB がオリジン単位**だからである。URLが変われば
+記録は丸ごと消えるので、使い捨てのトンネルURLは使えない。
+
+`base: './'` のまま。サブパス配信でも SW のスコープ・manifest の `start_url` /
+`scope` / アイコンがすべて `/training-log/` に解決し、オフライン再読み込みも
+通ることを確認済み。
+
+**オリジンは `ben1san.github.io` であってパスではない。**同じユーザーの他の
+Pages プロジェクトとストレージ名前空間を共有するので、DB名 `training` は
+その範囲で一意である必要がある。
+
+**iPhoneではSafariで開いてホーム画面に追加して使う。**Safariはスクリプト
+書き込みストレージを7日間の未使用で破棄し、インストール済みPWAだけが対象外
+（この前提は未検証）。インストールされていない状態では画面上部に警告が出る。
 
 ## 旧実装から引き継いだ決定
 
