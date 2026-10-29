@@ -32,6 +32,28 @@ export interface Exercise {
   createdAt: number
 }
 
+/**
+ * 計測した休憩。**`at` の差からは出せないので列ではなくストアを足した。**
+ * 差には「前のセットを終えてから次のセットを終えるまで」が入るのでセットの
+ * 実行時間が混ざる。ストップウォッチが測るのはそこを除いた休憩そのもの。
+ *
+ * **必ずセットとセットに挟まれた区間である。**両端のセットULIDを持ち、
+ * どちらかが欠ける区間は記録しない。確定するのは次のセットを保存した瞬間で、
+ * 終了ボタンは計測を止めるだけ（止めた時刻が endedAt になる）。
+ *
+ * 種目は fromSetUlid から引けるので列に持たない（導出できるものは導出する）。
+ */
+export interface RestRecord {
+  ulid: string
+  /** この休憩の前のセット */
+  fromSetUlid: string
+  /** この休憩を閉じたセット。ここに紐づく「直前の休憩」になる */
+  toSetUlid: string
+  startedAt: number
+  endedAt: number
+  day: string
+}
+
 export interface BodyWeight {
   ulid: string
   kg: number
@@ -55,6 +77,11 @@ interface Schema extends DBSchema {
     value: BodyWeight
     indexes: { by_day: string }
   }
+  rests: {
+    key: string
+    value: RestRecord
+    indexes: { by_day: string; by_to: string }
+  }
 }
 
 export const localDay = (at: number): string => {
@@ -66,18 +93,27 @@ export const localDay = (at: number): string => {
 let dbp: Promise<IDBPDatabase<Schema>> | null = null
 
 export const db = () => {
-  dbp ??= openDB<Schema>('training', 1, {
-    upgrade(d) {
-      const sets = d.createObjectStore('sets', { keyPath: 'ulid' })
-      sets.createIndex('by_exercise', ['exerciseId', 'at'])
-      sets.createIndex('by_day', 'day')
+  // v2 で rests を足した。既存のv1は oldVersion で分岐して作り足すだけ。
+  dbp ??= openDB<Schema>('training', 2, {
+    upgrade(d, oldVersion) {
+      if (oldVersion < 1) {
+        const sets = d.createObjectStore('sets', { keyPath: 'ulid' })
+        sets.createIndex('by_exercise', ['exerciseId', 'at'])
+        sets.createIndex('by_day', 'day')
 
-      const ex = d.createObjectStore('exercises', { keyPath: 'ulid' })
-      ex.createIndex('by_pattern', 'patternId')
-      ex.createIndex('by_name', 'name', { unique: true })
+        const ex = d.createObjectStore('exercises', { keyPath: 'ulid' })
+        ex.createIndex('by_pattern', 'patternId')
+        ex.createIndex('by_name', 'name', { unique: true })
 
-      const bw = d.createObjectStore('bodyweight', { keyPath: 'ulid' })
-      bw.createIndex('by_day', 'day')
+        const bw = d.createObjectStore('bodyweight', { keyPath: 'ulid' })
+        bw.createIndex('by_day', 'day')
+      }
+      if (oldVersion < 2) {
+        const rests = d.createObjectStore('rests', { keyPath: 'ulid' })
+        rests.createIndex('by_day', 'day')
+        // セットから直前の休憩を引くための索引
+        rests.createIndex('by_to', 'toSetUlid', { unique: true })
+      }
     }
   })
   return dbp
@@ -92,6 +128,28 @@ export const addExercise = async (name: string, patternId: string): Promise<Exer
   const e: Exercise = { ulid: ulid(), name: name.trim(), patternId, createdAt: Date.now() }
   await (await db()).add('exercises', e)
   return e
+}
+
+/**
+ * プリセットの一括追加。**同名が既にあるものは飛ばす。**
+ * by_name が一意索引なので、重複は作れない。似た名前（「ベンチプレス」と
+ * 「バーベルベンチプレス」）は別物として両方残るので、畳むのは手でやる。
+ */
+export const addExercisesMissing = async (
+  list: { name: string; patternId: string }[]
+): Promise<{ added: number; skipped: number }> => {
+  const d = await db()
+  const have = new Set((await d.getAll('exercises')).map((e) => e.name))
+  const tx = d.transaction('exercises', 'readwrite')
+  let added = 0
+  for (const x of list) {
+    if (have.has(x.name)) continue
+    await tx.store.add({ ulid: ulid(), name: x.name, patternId: x.patternId, createdAt: Date.now() })
+    have.add(x.name)
+    added++
+  }
+  await tx.done
+  return { added, skipped: list.length - added }
 }
 
 // --- セット ---
@@ -155,11 +213,110 @@ export const addBodyWeight = async (kg: number): Promise<BodyWeight> => {
 export const bodyWeightOfDay = async (day: string): Promise<BodyWeight[]> =>
   (await (await db()).getAllFromIndex('bodyweight', 'by_day', day)).sort((a, b) => a.at - b.at)
 
+// --- 全件読み (閲覧面) ---
+//
+// 4238行規模で全走査は数ms。索引を増やさず、閲覧側の集計は derive.ts の
+// 純関数で行う。**列もストアも増やさない**という設計 (記録項目は落とす側で
+// 決まった) を閲覧面にも通すため、セッション・部位・挙上量はすべて導出。
+
+export const allSets = async (): Promise<SetRecord[]> =>
+  (await (await db()).getAll('sets')).sort((a, b) => a.at - b.at)
+
+export const allBodyWeight = async (): Promise<BodyWeight[]> =>
+  (await (await db()).getAll('bodyweight')).sort((a, b) => a.at - b.at)
+
+export const allRests = async (): Promise<RestRecord[]> =>
+  (await (await db()).getAll('rests')).sort((a, b) => a.endedAt - b.endedAt)
+
+/**
+ * セット間の休憩を1件追記する。**両端のセットが揃ったときにだけ書く。**
+ * 1秒未満は誤爆とみなして捨てる。
+ */
+export const addRest = async (
+  fromSetUlid: string,
+  toSetUlid: string,
+  startedAt: number,
+  endedAt: number
+): Promise<RestRecord | null> => {
+  if (endedAt - startedAt < 1000) return null
+  const rec: RestRecord = {
+    ulid: ulid(endedAt),
+    fromSetUlid,
+    toSetUlid,
+    startedAt,
+    endedAt,
+    day: localDay(startedAt)
+  }
+  try {
+    await (await db()).add('rests', rec)
+  } catch {
+    return null // by_to が一意。同じセットに二重に紐づけない
+  }
+  return rec
+}
+
+// --- 訂正 ---
+//
+// 過去のセットを直す唯一の経路。**列を1つも足さない**ために
+// 「元を void して、同じ at で新しい行を追記する」形にしてある。
+// supersedes 列を持たせる案は捨てた。Vault 側は既に voidedAt を見て
+// 間引くので、追加の解釈規則が要らない。
+//
+// 新しい行の ULID は **現在時刻**で振る (at ではなく)。ULID の辞書順が
+// 表すのは追記順であり、訂正は今おこなわれた追記だから。イベント時刻は
+// at が持つ。by_exercise = [exerciseId, at] なので時系列上は正しい位置に入る。
+
+export const reviseSet = async (
+  id: string,
+  patch: { weight: number; reps: number; rir: Rir }
+): Promise<SetRecord | undefined> => {
+  const d = await db()
+  const old = await d.get('sets', id)
+  if (!old || old.voidedAt !== null) return undefined
+  const rec: SetRecord = {
+    ...old,
+    ulid: ulid(), // 追記順。at は引き継ぐ
+    weight: patch.weight,
+    reps: patch.reps,
+    rir: patch.rir
+  }
+  const tx = d.transaction('sets', 'readwrite')
+  await tx.store.put({ ...old, voidedAt: Date.now() })
+  await tx.store.add(rec)
+  await tx.done
+  return rec
+}
+
+/** 過去日に対する追記。日付を手で入れて記録を補う。 */
+export const addSetAt = async (
+  s: { exerciseId: string; weight: number; reps: number; rir: Rir; at: number }
+): Promise<SetRecord> => {
+  const rec: SetRecord = {
+    ulid: ulid(),
+    exerciseId: s.exerciseId,
+    weight: s.weight,
+    reps: s.reps,
+    rir: s.rir,
+    at: s.at,
+    day: localDay(s.at),
+    voidedAt: null
+  }
+  await (await db()).add('sets', rec)
+  return rec
+}
+
+export const renameExercise = async (id: string, name: string) => {
+  const d = await db()
+  const e = await d.get('exercises', id)
+  if (e) await d.put('exercises', { ...e, name: name.trim() })
+}
+
 export const counts = async () => {
   const d = await db()
   return {
     sets: await d.count('sets'),
     exercises: await d.count('exercises'),
-    bodyweight: await d.count('bodyweight')
+    bodyweight: await d.count('bodyweight'),
+    rests: await d.count('rests')
   }
 }

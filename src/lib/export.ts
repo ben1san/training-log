@@ -1,5 +1,5 @@
 import { db } from './db'
-import type { SetRecord, Exercise, BodyWeight } from './db'
+import type { SetRecord, Exercise, BodyWeight, RestRecord } from './db'
 
 // 同期経路は未決 (LAN / git API直接コミット / 手動エクスポート)。
 // 差し替えコストはこのファイルの2点に閉じ込めてある:
@@ -13,6 +13,7 @@ type Line =
   | ({ type: 'exercise' } & Exercise)
   | ({ type: 'set' } & SetRecord)
   | ({ type: 'bodyweight' } & BodyWeight)
+  | ({ type: 'rest' } & RestRecord)
 
 /** [from, to) の記録をJSONLにする。参照された種目は範囲外でも必ず同梱する。 */
 export const exportJSONL = async (from = 0, to = Number.MAX_SAFE_INTEGER): Promise<string> => {
@@ -22,6 +23,8 @@ export const exportJSONL = async (from = 0, to = Number.MAX_SAFE_INTEGER): Promi
   // 取り消し済み (voidedAt) の行も出す。追記のみなので間引くのはVault側の仕事
   const sets = (await d.getAll('sets')).filter(inRange)
   const bw = (await d.getAll('bodyweight')).filter(inRange)
+  // 休憩は at を持たないので endedAt で範囲を切る（両端のセットULIDを持つ）
+  const rests = (await d.getAll('rests')).filter((r) => r.endedAt >= from && r.endedAt < to)
 
   const need = new Set(sets.map((s) => s.exerciseId))
   const exercises = (await d.getAll('exercises')).filter(
@@ -31,7 +34,8 @@ export const exportJSONL = async (from = 0, to = Number.MAX_SAFE_INTEGER): Promi
   const lines: Line[] = [
     ...exercises.map((e) => ({ type: 'exercise' as const, ...e })),
     ...sets.map((s) => ({ type: 'set' as const, ...s })),
-    ...bw.map((b) => ({ type: 'bodyweight' as const, ...b }))
+    ...bw.map((b) => ({ type: 'bodyweight' as const, ...b })),
+    ...rests.map((r) => ({ type: 'rest' as const, ...r }))
   ]
   lines.sort((a, b) => (a.ulid < b.ulid ? -1 : a.ulid > b.ulid ? 1 : 0))
 
