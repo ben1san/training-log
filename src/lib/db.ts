@@ -305,10 +305,21 @@ export const addSetAt = async (
   return rec
 }
 
-export const renameExercise = async (id: string, name: string) => {
+/**
+ * 種目名の変更。**by_name が一意索引なので、既存の名前への変更は
+ * ConstraintError で失敗する**（呼び出し側が catch して出し分ける）。
+ * patternId・ulid は変えない — 名前は表示上のラベルでしかなく、
+ * 既存セットの exerciseId との紐付けはそのまま残る。
+ */
+export const renameExercise = async (id: string, name: string): Promise<Exercise | undefined> => {
+  const trimmed = name.trim()
+  if (!trimmed) return undefined
   const d = await db()
   const e = await d.get('exercises', id)
-  if (e) await d.put('exercises', { ...e, name: name.trim() })
+  if (!e) return undefined
+  const rec: Exercise = { ...e, name: trimmed }
+  await d.put('exercises', rec)
+  return rec
 }
 
 export const counts = async () => {

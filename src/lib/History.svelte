@@ -3,7 +3,8 @@
   import { sessionsOf, historyOf, fmtVol, hhmm, mdShort, mmss, measuredRest, type Session } from './derive'
   import { PATTERN_BY_ID } from './patterns'
   import { ship } from './export'
-  import { localDay, type SetRecord, type Rir } from './db'
+  import { localDay, renameExercise, type SetRecord, type Rir } from './db'
+  import { reload } from './store.svelte'
   import Chart from './Chart.svelte'
   import SetEditor from './SetEditor.svelte'
   import Body from './Body.svelte'
@@ -22,6 +23,9 @@
   let openDay = $state<string | null>(null)
   let openEx = $state<string | null>(null)
   let editing = $state<SetRecord | null>(null)
+  let renaming = $state(false)
+  let newName = $state('')
+  let renameBusy = $state(false)
 
   const rirLabel = (r: Rir) => (r === 4 ? '4+' : String(r))
   const exMap = $derived(exMapOf(store.exercises))
@@ -66,6 +70,28 @@
     return p ? Math.round((sets[i]!.at - p.at) / 6000) / 10 : null
   }
   const toggleDay = (s: Session) => { openDay = openDay === s.day ? null : s.day; editing = null }
+
+  function startRename() {
+    if (!openEx) return
+    newName = nameOf(openEx)
+    renaming = true
+  }
+
+  async function saveRename() {
+    if (!openEx || renameBusy) return
+    renameBusy = true
+    try {
+      await renameExercise(openEx, newName)
+      await reload()
+      renaming = false
+      say('名前を変更した')
+    } catch (e) {
+      say(e instanceof DOMException && e.name === 'ConstraintError'
+        ? 'その名前は既に使われている' : '変更できなかった')
+    } finally {
+      renameBusy = false
+    }
+  }
 </script>
 
 <div class="h-top">
@@ -140,7 +166,7 @@
   <ul class="days">
     {#each exRows as r (r.ex.ulid)}
       <li>
-        <button class="day-row" onclick={() => { openEx = r.ex.ulid; editing = null }}>
+        <button class="day-row" onclick={() => { openEx = r.ex.ulid; editing = null; renaming = false }}>
           <span class="grow">
             <span class="d-date sm">{r.ex.name}</span>
             <span class="dim small block">{patOf(r.ex.ulid)}</span>
@@ -155,10 +181,21 @@
   </ul>
 {:else if mode === 'exercise' && openEx && hist}
   <div class="ex-top">
-    <button class="ghost" onclick={() => { openEx = null; editing = null }}>← 種目</button>
+    <button class="ghost" onclick={() => { openEx = null; editing = null; renaming = false }}>← 種目</button>
     <div class="grow">
-      <div class="d-date sm">{nameOf(openEx)}</div>
-      <div class="dim small">{patOf(openEx)} · {hist.total}セット / {hist.days.length}日</div>
+      {#if renaming}
+        <div class="rename-row">
+          <input class="rename-input" bind:value={newName} disabled={renameBusy} />
+          <button class="ghost" disabled={renameBusy} onclick={() => (renaming = false)}>やめる</button>
+          <button class="primary" disabled={renameBusy || !newName.trim()} onclick={saveRename}>保存</button>
+        </div>
+      {:else}
+        <div class="d-date sm rename-label">
+          {nameOf(openEx)}
+          <button class="ghost rename-btn" onclick={startRename}>名前を変更</button>
+        </div>
+        <div class="dim small">{patOf(openEx)} · {hist.total}セット / {hist.days.length}日</div>
+      {/if}
     </div>
   </div>
 
@@ -269,6 +306,13 @@
   .set-row .n { color: var(--dim); min-width: 1.4em; font-size: 13px; }
 
   .ex-top { display: flex; align-items: center; gap: 10px; }
+  .rename-label { display: flex; align-items: center; gap: 8px; }
+  .rename-btn { font-size: 13px; color: var(--dim); font-weight: 400; }
+  .rename-row { display: flex; align-items: center; gap: 8px; }
+  .rename-input {
+    flex: 1; min-width: 0; font-size: 16px; font-weight: 700; padding: 8px 10px;
+    background: var(--panel2); border: 1px solid var(--line); border-radius: 10px;
+  }
 
   .pr-grid { display: flex; flex-direction: column; gap: 8px; }
   .pr-grid > div { display: flex; align-items: baseline; gap: 8px; }
