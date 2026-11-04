@@ -14,12 +14,17 @@ const ulid = monotonicFactory()
 
 export type Rir = 0 | 1 | 2 | 3 | 4 // 4 は "4+"
 
+export type Side = 'L' | 'R'
+export const SIDE_LABEL: Record<Side, string> = { L: '左', R: '右' }
+
 export interface SetRecord {
   ulid: string
   exerciseId: string
   weight: number // kg
   reps: number
   rir: Rir
+  /** 左右交互の種目でどちら側だったか。交互でない種目は常に null */
+  side: Side | null
   at: number // 完了時刻 (epoch ms)。開始時刻は取らない
   day: string // ローカル日 YYYY-MM-DD
   voidedAt: number | null // 取り消し。行は消さない
@@ -29,6 +34,12 @@ export interface Exercise {
   ulid: string
   name: string
   patternId: string // 16枠への紐付け。必須
+  /**
+   * 左右を交互にやる種目か。作成時に決める。既存種目は undefined で、
+   * 生存判定の規律（undefined も null も「生きている」）と同じく
+   * undefined は false と同じに扱う。
+   */
+  alternatesSides: boolean
   createdAt: number
 }
 
@@ -124,8 +135,10 @@ export const db = () => {
 export const listExercises = async (): Promise<Exercise[]> =>
   (await (await db()).getAll('exercises')).sort((a, b) => a.name.localeCompare(b.name, 'ja'))
 
-export const addExercise = async (name: string, patternId: string): Promise<Exercise> => {
-  const e: Exercise = { ulid: ulid(), name: name.trim(), patternId, createdAt: Date.now() }
+export const addExercise = async (
+  name: string, patternId: string, alternatesSides = false
+): Promise<Exercise> => {
+  const e: Exercise = { ulid: ulid(), name: name.trim(), patternId, alternatesSides, createdAt: Date.now() }
   await (await db()).add('exercises', e)
   return e
 }
@@ -144,7 +157,9 @@ export const addExercisesMissing = async (
   let added = 0
   for (const x of list) {
     if (have.has(x.name)) continue
-    await tx.store.add({ ulid: ulid(), name: x.name, patternId: x.patternId, createdAt: Date.now() })
+    await tx.store.add({
+      ulid: ulid(), name: x.name, patternId: x.patternId, alternatesSides: false, createdAt: Date.now()
+    })
     have.add(x.name)
     added++
   }
@@ -169,7 +184,7 @@ export const lastSetOf = async (exerciseId: string): Promise<SetRecord | undefin
 }
 
 export const addSet = async (
-  s: Omit<SetRecord, 'ulid' | 'at' | 'day' | 'voidedAt'> & { at?: number }
+  s: Omit<SetRecord, 'ulid' | 'at' | 'day' | 'voidedAt' | 'side'> & { side?: Side | null; at?: number }
 ): Promise<SetRecord> => {
   const at = s.at ?? Date.now()
   const rec: SetRecord = {
@@ -178,6 +193,7 @@ export const addSet = async (
     weight: s.weight,
     reps: s.reps,
     rir: s.rir,
+    side: s.side ?? null,
     at,
     day: localDay(at),
     voidedAt: null
@@ -268,7 +284,7 @@ export const addRest = async (
 
 export const reviseSet = async (
   id: string,
-  patch: { weight: number; reps: number; rir: Rir }
+  patch: { weight: number; reps: number; rir: Rir; side?: Side | null }
 ): Promise<SetRecord | undefined> => {
   const d = await db()
   const old = await d.get('sets', id)
@@ -278,7 +294,8 @@ export const reviseSet = async (
     ulid: ulid(), // 追記順。at は引き継ぐ
     weight: patch.weight,
     reps: patch.reps,
-    rir: patch.rir
+    rir: patch.rir,
+    side: patch.side ?? old.side
   }
   const tx = d.transaction('sets', 'readwrite')
   await tx.store.put({ ...old, voidedAt: Date.now() })
@@ -289,7 +306,7 @@ export const reviseSet = async (
 
 /** 過去日に対する追記。日付を手で入れて記録を補う。 */
 export const addSetAt = async (
-  s: { exerciseId: string; weight: number; reps: number; rir: Rir; at: number }
+  s: { exerciseId: string; weight: number; reps: number; rir: Rir; side?: Side | null; at: number }
 ): Promise<SetRecord> => {
   const rec: SetRecord = {
     ulid: ulid(),
@@ -297,6 +314,7 @@ export const addSetAt = async (
     weight: s.weight,
     reps: s.reps,
     rir: s.rir,
+    side: s.side ?? null,
     at: s.at,
     day: localDay(s.at),
     voidedAt: null
@@ -318,6 +336,19 @@ export const renameExercise = async (id: string, name: string): Promise<Exercise
   const e = await d.get('exercises', id)
   if (!e) return undefined
   const rec: Exercise = { ...e, name: trimmed }
+  await d.put('exercises', rec)
+  return rec
+}
+
+/**
+ * 左右交互フラグの後からの切替。作成時に決めなかった既存種目（プリセット含む）
+ * を遡って対応させるための経路。ulid・name・patternId は変えない。
+ */
+export const setAlternatesSides = async (id: string, v: boolean): Promise<Exercise | undefined> => {
+  const d = await db()
+  const e = await d.get('exercises', id)
+  if (!e) return undefined
+  const rec: Exercise = { ...e, alternatesSides: v }
   await d.put('exercises', rec)
   return rec
 }

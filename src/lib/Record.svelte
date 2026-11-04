@@ -1,6 +1,6 @@
 <script lang="ts">
   import { PART_ORDER, PART_LABEL, patternsOf, PATTERN_BY_ID, type PartId } from './patterns'
-  import { addExercise, addSet, voidSet, type Exercise, type SetRecord, type Rir } from './db'
+  import { addExercise, addSet, voidSet, SIDE_LABEL, type Exercise, type SetRecord, type Rir, type Side } from './db'
   import { store, exMapOf, lastLiveSet, lastUsedMap, reload } from './store.svelte'
   import { groupByExercise, volumeOf, fmtVol, hhmm, mdShort, mmss, measuredRest } from './derive'
   import { armRest, commitRest } from './timer.svelte'
@@ -36,7 +36,12 @@
   let creating = $state(false)
   let newName = $state('')
   let newPattern = $state('')
+  let newAlternates = $state(false)
   let busy = $state(false)
+
+  const SIDES: Side[] = ['L', 'R']
+  /** 左右交互の種目でいま選んでいる側。交互でない種目は常に null */
+  let side = $state<Side | null>(null)
 
   const exMap = $derived(exMapOf(store.exercises))
   const todaySets = $derived(
@@ -56,12 +61,19 @@
   )
   const lastUsed = $derived(lastUsedMap(store.sets))
 
-  /** 「前回」= 当日を含まない直近の有効セット。入力中の参照はここが本体。 */
+  /**
+   * 「前回」= 当日を含まない直近の有効セット。入力中の参照はここが本体。
+   * **左右交互の種目は、側を選んだ後は同じ側の前回まで遡る。**
+   * 右をやった直後に左の前回と比べても進捗の判断材料にならないため。
+   */
   const prev = $derived.by(() => {
     if (!store.selectedId) return null
+    const bySide = selected?.alternatesSides && side !== null
     for (let i = store.sets.length - 1; i >= 0; i--) {
       const s = store.sets[i]!
-      if (s.exerciseId === store.selectedId && s.voidedAt === null && s.day !== store.today) return s
+      if (s.exerciseId !== store.selectedId || s.voidedAt !== null || s.day === store.today) continue
+      if (bySide && s.side !== side) continue
+      return s
     }
     return null
   })
@@ -150,12 +162,39 @@
       )
   )
 
+  /** この種目の有効セットのうち、側が一致する直近1件。 */
+  const lastOfSide = (exerciseId: string, v: Side) => {
+    for (let i = store.sets.length - 1; i >= 0; i--) {
+      const s = store.sets[i]!
+      if (s.exerciseId === exerciseId && s.voidedAt === null && s.side === v) return s
+    }
+    return undefined
+  }
+
   async function select(e: Exercise) {
     store.selectedId = e.ulid
     query = ''
-    // 当日分があればそれを、なければ前回をプリフィル元にする
-    const base = lastLiveSet(store.sets, e.ulid)
-    if (base) { weight = base.weight; reps = base.reps }
+    if (e.alternatesSides) {
+      // 直近にどちらをやったかから逆側を推測する。無ければ右から
+      let last: SetRecord | undefined
+      for (let i = store.sets.length - 1; i >= 0; i--) {
+        const s = store.sets[i]!
+        if (s.exerciseId === e.ulid && s.voidedAt === null && s.side !== null) { last = s; break }
+      }
+      pickSide(last ? (last.side === 'L' ? 'R' : 'L') : 'R', e.ulid)
+    } else {
+      side = null
+      // 当日分があればそれを、なければ前回をプリフィル元にする
+      const base = lastLiveSet(store.sets, e.ulid)
+      if (base) { weight = base.weight; reps = base.reps }
+    }
+  }
+
+  /** 側を選び直す。選んだ側の前回の重量・レップへプリフィルも合わせる。 */
+  function pickSide(v: Side, exerciseId = store.selectedId!) {
+    side = v
+    const m = lastOfSide(exerciseId, v)
+    if (m) { weight = m.weight; reps = m.reps }
   }
 
   // RIR のタップが保存を兼ねる。重量とレップがプリフィルなら 1セット1タップ
@@ -163,7 +202,7 @@
     if (!store.selectedId || busy) return
     busy = true
     try {
-      const saved = await addSet({ exerciseId: store.selectedId, weight, reps, rir })
+      const saved = await addSet({ exerciseId: store.selectedId, weight, reps, rir, side })
       // 直前の休憩はこのセットで閉じる。**書き込むのはここだけ。**
       const rest = await commitRest(saved.ulid)
       await reload()
@@ -171,9 +210,14 @@
       // このセットを次の区間の錨にする。**時計は動かさない**（開始は手で押す）
       armRest(saved.ulid, store.selectedId)
       say(
-        `${weight}kg × ${reps} / RIR ${rirLabel(rir)}` +
+        `${saved.weight}kg × ${saved.reps}${saved.side ? ` (${SIDE_LABEL[saved.side]})` : ''} / RIR ${rirLabel(rir)}` +
           (rest !== null ? `（休憩 ${mmss(rest)} を記録）` : '')
       )
+      // 交互種目は次のセット用に逆側へ自動で切り替える（1セット1タップを保つ）。
+      // メッセージ組み立てより後 — pickSide は weight/reps/side を書き換える
+      if (selected?.alternatesSides && saved.side !== null) {
+        pickSide(saved.side === 'L' ? 'R' : 'L')
+      }
     } finally {
       busy = false
     }
@@ -188,8 +232,8 @@
   async function create() {
     if (!newName.trim() || !newPattern) return
     try {
-      const e = await addExercise(newName, newPattern)
-      newName = ''; newPattern = ''; creating = false
+      const e = await addExercise(newName, newPattern, newAlternates)
+      newName = ''; newPattern = ''; newAlternates = false; creating = false
       await reload()
       await select(e)
     } catch {
@@ -232,10 +276,19 @@
       </button>
     </div>
 
+    {#if selected.alternatesSides}
+      <!-- 交互種目は側を選んでから重量・レップを見る。保存は変わらずRIRタップ -->
+      <div class="side">
+        {#each SIDES as v (v)}
+          <button class="side-btn {side === v ? 'on' : ''}" onclick={() => pickSide(v)}>{SIDE_LABEL[v]}</button>
+        {/each}
+      </div>
+    {/if}
+
     <!-- 一般アプリが必ず出している「前回」。値を使うだけでなく見せる -->
     <div class="prev">
       {#if prev}
-        <span class="dim">前回</span>
+        <span class="dim">前回{#if prev.side}（{SIDE_LABEL[prev.side]}）{/if}</span>
         <b>{prev.weight}kg × {prev.reps}</b>
         <span class="dim">RIR {rirLabel(prev.rir)}</span>
         <span class="dim small right">{mdShort(prev.day)}・{daysAgo(prev.day)}</span>
@@ -271,6 +324,7 @@
           {@const m = measuredRest(setsOfSelected, i, store.rests)}
           <li>
             <span class="n">{i + 1}</span>
+            {#if s.side}<span class="side-tag">{SIDE_LABEL[s.side]}</span>{/if}
             <span><b>{s.weight}</b>kg × <b>{s.reps}</b></span>
             <span class="dim">RIR {rirLabel(s.rir)}</span>
             <span class="dim small right">
@@ -294,7 +348,9 @@
           {#if showPat}<span class="dim small block">{patOf(e)}</span>{/if}
         </span>
         {#if lp}
-          <span class="dim small ta-r">{lp.weight}kg × {lp.reps}<br />{daysAgo(lp.day)}</span>
+          <span class="dim small ta-r">
+            {#if lp.side}{SIDE_LABEL[lp.side]} {/if}{lp.weight}kg × {lp.reps}<br />{daysAgo(lp.day)}
+          </span>
         {:else}
           <span class="dim small ta-r">未記録</span>
         {/if}
@@ -365,8 +421,12 @@
             </div>
           </div>
         {/each}
+        <label class="alt-check">
+          <input type="checkbox" bind:checked={newAlternates} />
+          <span>左右交互の種目（セットごとに左右をタップして記録する）</span>
+        </label>
         <div class="create-actions">
-          <button class="ghost" onclick={() => { creating = false; newPattern = '' }}>やめる</button>
+          <button class="ghost" onclick={() => { creating = false; newPattern = ''; newAlternates = false }}>やめる</button>
           <button class="primary" disabled={!newName.trim() || !newPattern} onclick={create}>作る</button>
         </div>
       </div>
@@ -390,7 +450,7 @@
         <div class="dim small tg-sub">{g.partLabel}・{g.patternLabel}</div>
         <div class="tg-sets">
           {#each g.sets as s (s.ulid)}
-            <span class="chip">{s.weight}×{s.reps}<i>·{rirLabel(s.rir)}</i></span>
+            <span class="chip">{#if s.side}{SIDE_LABEL[s.side]} {/if}{s.weight}×{s.reps}<i>·{rirLabel(s.rir)}</i></span>
           {/each}
         </div>
       </button>
@@ -437,6 +497,20 @@
     font-variant-numeric: tabular-nums; -moz-appearance: textfield; appearance: textfield;
   }
   .stepper .val span { color: var(--dim); font-size: 13px; }
+
+  .side { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; margin-bottom: 8px; }
+  .side-btn {
+    background: var(--panel2); border: 1px solid var(--line); border-radius: 10px;
+    min-height: 48px; font-weight: 700; font-size: 16px;
+  }
+  .side-btn.on { background: var(--accent); color: #06121f; border-color: var(--accent); }
+  .side-tag {
+    font-size: 12px; font-weight: 700; color: var(--dim); border: 1px solid var(--line);
+    border-radius: 6px; padding: 1px 5px; flex-shrink: 0;
+  }
+
+  .alt-check { display: flex; align-items: center; gap: 8px; font-size: 14px; padding: 4px 0; }
+  .alt-check input { width: 18px; height: 18px; flex-shrink: 0; }
 
   .rir-label { color: var(--dim); font-size: 13px; margin: 12px 0 6px; }
   .rir { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }

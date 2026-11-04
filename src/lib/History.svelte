@@ -3,7 +3,7 @@
   import { sessionsOf, historyOf, fmtVol, hhmm, mdShort, mmss, measuredRest, type Session } from './derive'
   import { PATTERN_BY_ID } from './patterns'
   import { ship } from './export'
-  import { localDay, renameExercise, type SetRecord, type Rir } from './db'
+  import { localDay, renameExercise, setAlternatesSides, SIDE_LABEL, type SetRecord, type Rir } from './db'
   import { reload } from './store.svelte'
   import Chart from './Chart.svelte'
   import SetEditor from './SetEditor.svelte'
@@ -92,6 +92,13 @@
       renameBusy = false
     }
   }
+
+  /** 作成時に決め損ねた種目を、後から左右交互へ切り替える経路。 */
+  async function toggleAlternates(id: string, v: boolean) {
+    await setAlternatesSides(id, v)
+    await reload()
+    say(v ? '左右交互に切り替えた（次のセットから左右を選べる）' : '左右交互をやめた')
+  }
 </script>
 
 <div class="h-top">
@@ -143,6 +150,7 @@
                     <li>
                       <button class="set-row" onclick={() => (editing = editing?.ulid === st.ulid ? null : st)}>
                         <span class="n">{i + 1}</span>
+                        {#if st.side}<span class="side-tag">{SIDE_LABEL[st.side]}</span>{/if}
                         <span><b>{st.weight}</b>kg × <b>{st.reps}</b></span>
                         <span class="dim">RIR {rirLabel(st.rir)}</span>
                         <span class="dim small right">
@@ -150,7 +158,10 @@
                         </span>
                       </button>
                       {#if editing?.ulid === st.ulid}
-                        <SetEditor target={st} name={g.name} {say} close={() => (editing = null)} />
+                        <SetEditor
+                          target={st} name={g.name} alternatesSides={exMap.get(g.exerciseId)?.alternatesSides ?? false}
+                          {say} close={() => (editing = null)}
+                        />
                       {/if}
                     </li>
                   {/each}
@@ -195,6 +206,14 @@
           <button class="ghost rename-btn" onclick={startRename}>名前を変更</button>
         </div>
         <div class="dim small">{patOf(openEx)} · {hist.total}セット / {hist.days.length}日</div>
+        <label class="alt-check">
+          <input
+            type="checkbox"
+            checked={exMap.get(openEx)?.alternatesSides ?? false}
+            onchange={(ev) => toggleAlternates(openEx!, ev.currentTarget.checked)}
+          />
+          <span>左右交互の種目</span>
+        </label>
       {/if}
     </div>
   </div>
@@ -246,12 +265,16 @@
               <li>
                 <button class="set-row" onclick={() => (editing = editing?.ulid === st.ulid ? null : st)}>
                   <span class="n">{i + 1}</span>
+                  {#if st.side}<span class="side-tag">{SIDE_LABEL[st.side]}</span>{/if}
                   <span><b>{st.weight}</b>kg × <b>{st.reps}</b></span>
                   <span class="dim">RIR {rirLabel(st.rir)}</span>
                   <span class="dim small right">{hhmm(st.at)}</span>
                 </button>
                 {#if editing?.ulid === st.ulid}
-                  <SetEditor target={st} name={nameOf(openEx)} {say} close={() => (editing = null)} />
+                  <SetEditor
+                    target={st} name={nameOf(openEx)} alternatesSides={exMap.get(openEx)?.alternatesSides ?? false}
+                    {say} close={() => (editing = null)}
+                  />
                 {/if}
               </li>
             {/each}
@@ -304,6 +327,10 @@
     font-variant-numeric: tabular-nums; min-height: 44px;
   }
   .set-row .n { color: var(--dim); min-width: 1.4em; font-size: 13px; }
+  .side-tag {
+    font-size: 12px; font-weight: 700; color: var(--dim); border: 1px solid var(--line);
+    border-radius: 6px; padding: 1px 5px; flex-shrink: 0;
+  }
 
   .ex-top { display: flex; align-items: center; gap: 10px; }
   .rename-label { display: flex; align-items: center; gap: 8px; }
@@ -313,6 +340,8 @@
     flex: 1; min-width: 0; font-size: 16px; font-weight: 700; padding: 8px 10px;
     background: var(--panel2); border: 1px solid var(--line); border-radius: 10px;
   }
+  .alt-check { display: flex; align-items: center; gap: 8px; font-size: 13px; margin-top: 4px; color: var(--dim); }
+  .alt-check input { width: 16px; height: 16px; flex-shrink: 0; }
 
   .pr-grid { display: flex; flex-direction: column; gap: 8px; }
   .pr-grid > div { display: flex; align-items: baseline; gap: 8px; }

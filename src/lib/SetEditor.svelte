@@ -1,6 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte'
-  import { reviseSet, voidSet, type SetRecord, type Rir } from './db'
+  import { reviseSet, voidSet, SIDE_LABEL, type SetRecord, type Rir, type Side } from './db'
   import { reload } from './store.svelte'
   import { hhmm, mdShort } from './derive'
 
@@ -9,25 +9,32 @@
   // 同期を後から足せなくなる。
 
   let {
-    target, name, say, close
-  }: { target: SetRecord; name: string; say: (m: string) => void; close: () => void } = $props()
+    target, name, alternatesSides = false, say, close
+  }: {
+    target: SetRecord; name: string; alternatesSides?: boolean
+    say: (m: string) => void; close: () => void
+  } = $props()
 
   const RIRS: Rir[] = [0, 1, 2, 3, 4]
+  const SIDES: Side[] = ['L', 'R']
   const rirLabel = (r: Rir) => (r === 4 ? '4+' : String(r))
 
   // 編集対象は ulid キーで再マウントされるので初期値は一度だけ読む
   let w = $state(untrack(() => target.weight))
   let r = $state(untrack(() => target.reps))
   let rir = $state<Rir>(untrack(() => target.rir))
+  let side = $state<Side | null>(untrack(() => target.side))
   let busy = $state(false)
 
-  const dirty = $derived(w !== target.weight || r !== target.reps || rir !== target.rir)
+  const dirty = $derived(
+    w !== target.weight || r !== target.reps || rir !== target.rir || side !== target.side
+  )
 
   async function save() {
     if (!dirty || busy) return
     busy = true
     try {
-      await reviseSet(target.ulid, { weight: w, reps: r, rir })
+      await reviseSet(target.ulid, { weight: w, reps: r, rir, side })
       await reload()
       say('訂正した（元の行は void で残る）')
       close()
@@ -64,6 +71,13 @@
     <div class="val"><input bind:value={r} type="number" inputmode="numeric" step="1" /><span>reps</span></div>
     <button onclick={() => (r = r + 1)}>+1</button>
   </div>
+  {#if alternatesSides}
+    <div class="sides">
+      {#each SIDES as v (v)}
+        <button class="rb {side === v ? 'on' : ''}" onclick={() => (side = v)}>{SIDE_LABEL[v]}</button>
+      {/each}
+    </div>
+  {/if}
   <div class="rirs">
     {#each RIRS as v (v)}
       <button class="rb {rir === v ? 'on' : ''}" onclick={() => (rir = v)}>{rirLabel(v)}</button>
@@ -92,6 +106,7 @@
     font-variant-numeric: tabular-nums; appearance: textfield;
   }
   .val span { color: var(--dim); font-size: 13px; }
+  .sides { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; margin-bottom: 6px; }
   .rirs { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; margin: 8px 0 12px; }
   .rb {
     min-height: 48px; border-radius: 10px; background: var(--panel);
