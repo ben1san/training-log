@@ -4,6 +4,7 @@
   import { store, exMapOf, lastLiveSet, lastUsedMap, reload } from './store.svelte'
   import { groupByExercise, volumeOf, fmtVol, hhmm, mdShort, mmss, measuredRest } from './derive'
   import { armRest, commitRest } from './timer.svelte'
+  import ExerciseEdit from './ExerciseEdit.svelte'
 
   let { say }: { say: (m: string) => void } = $props()
 
@@ -37,6 +38,7 @@
   let newName = $state('')
   let newPattern = $state('')
   let newAlternates = $state(false)
+  let editingEx = $state(false)
   let busy = $state(false)
 
   const SIDES: Side[] = ['L', 'R']
@@ -174,6 +176,7 @@
   async function select(e: Exercise) {
     store.selectedId = e.ulid
     query = ''
+    editingEx = false
     if (e.alternatesSides) {
       // 直近にどちらをやったかから逆側を推測する。無ければ右から
       let last: SetRecord | undefined
@@ -202,7 +205,10 @@
     if (!store.selectedId || busy) return
     busy = true
     try {
-      const saved = await addSet({ exerciseId: store.selectedId, weight, reps, rir, side })
+      // 編集中にその場で左右交互を解除された場合に側が残らないよう、都度 selected で確認する
+      const saved = await addSet({
+        exerciseId: store.selectedId, weight, reps, rir, side: selected?.alternatesSides ? side : null
+      })
       // 直前の休憩はこのセットで閉じる。**書き込むのはここだけ。**
       const rest = await commitRest(saved.ulid)
       await reload()
@@ -264,8 +270,12 @@
   <section class="entry">
     <div class="ex-head">
       <div class="ex-name grow">{selected.name}</div>
-      <button class="ghost" onclick={() => (store.selectedId = null)}>変更</button>
+      <button class="ghost" onclick={() => (editingEx = !editingEx)}>編集</button>
+      <button class="ghost" onclick={() => { store.selectedId = null; editingEx = false }}>変更</button>
     </div>
+    {#if editingEx}
+      <ExerciseEdit exercise={selected} {say} />
+    {/if}
     <div class="ex-sub">
       <span class="dim small grow">{patOf(selected)}</span>
       <!-- フォーカス指標。タップで 総挙上量 → 前回比 → 総レップ → 最高重量 を巡回 -->
